@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+# roost: put an X/Twitter data export into sqlite and let you read it.
+#
+# an export is a pile of .js files that are json wearing a hat, one assignment
+# line then an array. this loads them into a single database with full text
+# search, then serves a page for reading it. nothing leaves the machine and
+# there are no dependencies beyond the standard library.
+
+import argparse, html, json, os, re, sqlite3, sys, zipfile
+from datetime import datetime, timezone
+
+VERSION = "0.1.0"
+DB_DEFAULT = "roost.db"
+
+# the files worth loading, and how to read each shape.
+TWEET_FILES = ("tweets.js", "tweets-part1.js", "tweets-part2.js",
+               "tweets-part2.js", "tweets-part3.js", "tweets-part4.js")
+DELETED_FILES = ("deleted-tweets.js",)
+LIKE_FILES = ("like.js", "like-part1.js", "like-part2.js")
+DM_FILES = ("direct-messages.js", "direct-messages-group.js")
+ACCOUNT_FILES = ("account.js",)
+
+
+def strip_assignment(text):
+    """an export file is `window.YTD.<name>.partN = [...]`. drop the head."""
+    i = text.find("=")
+    if i < 0:
+        raise ValueError("no assignment found, not an export file")
+    return json.loads(text[i + 1:])
+
+
+def parse_ts(s):
+    """twitter writes 'Sun Jun 12 00:48:28 +0000 2022'."""
+    for fmt in ("%a %b %d %H:%M:%S %z %Y", "%Y-%m-%dT%H:%M:%S.%fZ"):
+        try:
+            d = datetime.strptime(s, fmt)
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=timezone.utc)
+            return int(d.timestamp())
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+class Source:
+    """reads either a .zip export or an already-extracted directory."""
+
+    def __init__(self, path):
+        self.path = path
+        self.zip = zipfile.ZipFile(path) if zipfile.is_zipfile(path) else None
+        if self.zip:
+            self.names = {os.path.basename(n): n for n in self.zip.namelist()
+                          if n.startswith("data/") and n.endswith(".js")}
+        elif os.path.isdir(path):
+            self.names = {}
+            for root, _, files in os.walk(path):
+                for f in files:
+                    if f.endswith(".js"):
+                        self.names.setdefault(f, os.path.join(root, f))
+        else:
+            raise SystemExit(f"not a zip or a directory: {path}")
+
+    def read(self, basename):
+        n = self.names.get(basename)
+        if not n:
+            return None
+        if self.zip:
+            raw = self.zip.read(n)
+        else:
+            raw = open(n, "rb").read()
+        return strip_assignment(raw.decode("utf-8", "replace"))
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS tweets (
+  id TEXT PRIMARY KEY, ts INTEGER, created_at TEXT, text TEXT,
+  reply_to_user TEXT, reply_to_status TEXT, is_retweet INTEGER,
+  favorites INTEGER, retweets INTEGER, lang TEXT, deleted INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS mentions (tweet_id TEXT, handle TEXT);
+CREATE TABLE IF NOT EXISTS urls (tweet_id TEXT, url TEXT);
+CREATE TABLE IF NOT EXISTS likes (tweet_id TEXT PRIMARY KEY, text TEXT);
+CREATE TABLE IF NOT EXISTS dms (
+  id TEXT PRIMARY KEY, conversation TEXT, ts INTEGER, created_at TEXT,
+  sender TEXT, recipient TEXT, text TEXT, is_group INTEGER);
+CREATE INDEX IF NOT EXISTS i_tweets_ts ON tweets(ts);
+CREATE INDEX IF NOT EXISTS i_tweets_reply ON tweets(reply_to_user);
+CREATE INDEX IF NOT EXISTS i_mentions ON mentions(handle);
+CREATE INDEX IF NOT EXISTS i_dms_conv ON dms(conversation, ts);
+CREATE VIRTUAL TABLE IF NOT EXISTS tweets_fts USING fts5(
+  text, content='tweets', content_rowid='rowid');
+CREATE VIRTUAL TABLE IF NOT EXISTS dms_fts USING fts5(
+  text, content='dms', content_rowid='rowid');
+"""
+
+
+def cmd_load(args):
+    src = Source(args.archive)
+    if os.path.exists(args.db) and not args.force:
+        raise SystemExit(f"{args.db} exists, pass --force to rebuild")
+    if os.path.exists(args.db):
+        os.remove(args.db)
+    db = sqlite3.connect(args.db)
+    db.executescript(SCHEMA)
+
+    acct = src.read("account.js") or []
+    handle = ""
+    if acct:
+        a = acct[0].get("account", {})
+        handle = a.get("username", "")
+        for k in ("username", "accountId", "accountDisplayName", "createdAt", "email"):
+            db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (k, a.get(k, "")))
+    db.execute("INSERT OR REPLACE INTO meta VALUES ('source',?)",
+               (os.path.basename(args.archive),))
+    db.execute("INSERT OR REPLACE INTO meta VALUES ('roost_version',?)", (VERSION,))
+
+    n_t = n_d = n_l = n_m = 0
+    for group, deleted in ((TWEET_FILES, 0), (DELETED_FILES, 1)):
+        for fn in dict.fromkeys(group):
+            rows = src.read(fn)
+            if not rows:
+                continue
+            for o in rows:
+                t = o.get("tweet") or o
+                tid = t.get("id_str") or t.get("id")
+                if not tid:
+                    continue
+                txt = t.get("full_text", "") or ""
+                db.execute(
+                    "INSERT OR REPLACE INTO tweets VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (tid, parse_ts(t.get("created_at", "")), t.get("created_at", ""),
+                     txt, t.get("in_reply_to_screen_name"), t.get("in_reply_to_status_id_str"),
+                     1 if txt.startswith("RT @") else 0,
+                     int(t.get("favorite_count") or 0), int(t.get("retweet_count") or 0),
+                     t.get("lang"), deleted))
+                ents = t.get("entities", {}) or {}
+                for m in ents.get("user_mentions", []) or []:
+                    db.execute("INSERT INTO mentions VALUES (?,?)",
+                               (tid, (m.get("screen_name") or "").lower()))
+                    n_m += 1
+                for u in ents.get("urls", []) or []:
+                    if u.get("expanded_url"):
+                        db.execute("INSERT INTO urls VALUES (?,?)", (tid, u["expanded_url"]))
+                if deleted:
+                    n_d += 1
+                else:
+                    n_t += 1
+            print(f"  {fn}: {len(rows)}")
+
+    for fn in LIKE_FILES:
+        rows = src.read(fn)
+        if not rows:
+            continue
+        for o in rows:
+            l = o.get("like") or o
+            if l.get("tweetId"):
+                db.execute("INSERT OR REPLACE INTO likes VALUES (?,?)",
+                           (l["tweetId"], l.get("fullText", "")))
+                n_l += 1
+        print(f"  {fn}: {len(rows)}")
+
+    n_dm = 0
+    for fn in DM_FILES:
+        rows = src.read(fn)
+        if not rows:
+            continue
+        grp = 1 if "group" in fn else 0
+        for o in rows:
+            conv = o.get("dmConversation") or {}
+            cid = conv.get("conversationId", "")
+            for m in conv.get("messages", []) or []:
+                mc = m.get("messageCreate")
+                if not mc:
+                    continue
+                db.execute("INSERT OR REPLACE INTO dms VALUES (?,?,?,?,?,?,?,?)",
+                           (mc.get("id", ""), cid, parse_ts(mc.get("createdAt", "")),
+                            mc.get("createdAt", ""), mc.get("senderId", ""),
+                            mc.get("recipientId", ""), mc.get("text", ""), grp))
+                n_dm += 1
+        print(f"  {fn}: {len(rows)} conversations")
+
+    db.execute("INSERT INTO tweets_fts(rowid, text) SELECT rowid, text FROM tweets")
+    db.execute("INSERT INTO dms_fts(rowid, text) SELECT rowid, text FROM dms")
+    db.commit()
+    os.chmod(args.db, 0o600)
+    print(f"\n  account:   @{handle}")
+    print(f"  tweets:    {n_t}")
+    print(f"  deleted:   {n_d}")
+    print(f"  likes:     {n_l}")
+    print(f"  dms:       {n_dm}")
+    print(f"  mentions:  {n_m}")
+    print(f"\n  {args.db}, mode 600")
+    print("  not loaded: media, followers, ad data, and anything the export omits,")
+    print("  which includes the text of tweets you replied to or quoted.")
+
+
+def connect(path):
+    if not os.path.exists(path):
+        raise SystemExit(f"no database at {path}, run: roost load <archive>")
+    db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
+    return db
+
+
+def cmd_stats(args):
+    db = connect(args.db)
+    m = dict(db.execute("SELECT key, value FROM meta"))
+    print(f"  account:  @{m.get('username','?')}  ({m.get('accountId','?')})")
+    print(f"  source:   {m.get('source','?')}")
+    for label, q in (("tweets", "SELECT COUNT(*) FROM tweets WHERE deleted=0"),
+                     ("deleted", "SELECT COUNT(*) FROM tweets WHERE deleted=1"),
+                     ("retweets", "SELECT COUNT(*) FROM tweets WHERE is_retweet=1"),
+                     ("replies", "SELECT COUNT(*) FROM tweets WHERE reply_to_user IS NOT NULL"),
+                     ("likes", "SELECT COUNT(*) FROM likes"),
+                     ("dms", "SELECT COUNT(*) FROM dms")):
+        print(f"  {label:9} {db.execute(q).fetchone()[0]}")
+    r = db.execute("SELECT MIN(ts), MAX(ts) FROM tweets WHERE ts IS NOT NULL").fetchone()
+    if r[0]:
+        f = lambda t: datetime.fromtimestamp(t, timezone.utc).date()
+        print(f"  range:    {f(r[0])} -> {f(r[1])}")
+    print("\n  most replied-to:")
+    for row in db.execute("SELECT reply_to_user h, COUNT(*) c FROM tweets "
+                          "WHERE reply_to_user IS NOT NULL GROUP BY 1 ORDER BY c DESC LIMIT 10"):
+        print(f"    {row['c']:6}  @{row['h']}")
+
+
+def show(rows):
+    for r in rows:
+        d = datetime.fromtimestamp(r["ts"], timezone.utc).strftime("%Y-%m-%d %H:%M") if r["ts"] else "?"
+        flag = " [DELETED]" if r["deleted"] else ""
+        rt = f"  reply_to=@{r['reply_to_user']}" if r["reply_to_user"] else ""
+        print(f"--- {d}{flag}{rt}  id={r['id']}")
+        print(f"    https://twitter.com/i/status/{r['id']}")
+        print(f"    {r['text']}\n")
+
+
+def cmd_search(args):
+    db = connect(args.db)
+    rows = db.execute(
+        "SELECT t.* FROM tweets_fts f JOIN tweets t ON t.rowid=f.rowid "
+        "WHERE tweets_fts MATCH ? ORDER BY t.ts LIMIT ?", (args.query, args.limit)).fetchall()
+    print(f"{len(rows)} tweets matching {args.query!r}\n")
+    show(rows)
+
+
+def cmd_user(args):
+    db = connect(args.db)
+    h = args.handle.lstrip("@").lower()
+    rows = db.execute(
+        "SELECT DISTINCT t.* FROM tweets t LEFT JOIN mentions m ON m.tweet_id=t.id "
+        "WHERE LOWER(t.reply_to_user)=? OR m.handle=? ORDER BY t.ts LIMIT ?",
+        (h, h, args.limit)).fetchall()
+    print(f"{len(rows)} tweets involving @{h}\n")
+    show(rows)
+    ids = db.execute(
+        "SELECT DISTINCT reply_to_status FROM tweets WHERE LOWER(reply_to_user)=? "
+        "AND reply_to_status IS NOT NULL", (h,)).fetchall()
+    if ids:
+        print(f"{len(ids)} of their tweet ids, recovered from your reply metadata:")
+        for i in ids:
+            print(f"  https://twitter.com/{h}/status/{i[0]}")
+
+
+def cmd_thread(args):
+    db = connect(args.db)
+    seen, cur = [], args.id
+    while cur:
+        r = db.execute("SELECT * FROM tweets WHERE id=?", (cur,)).fetchone()
+        if not r:
+            break
+        seen.append(r)
+        cur = r["reply_to_status"]
+    show(reversed(seen))
+    kids = db.execute("SELECT * FROM tweets WHERE reply_to_status=? ORDER BY ts",
+                      (args.id,)).fetchall()
+    if kids:
+        print("replies:")
+        show(kids)
+
+
+PAGE = """<!doctype html><meta charset=utf-8><title>roost</title>
+<style>
+:root{--bg:#fff;--fg:#111;--dim:#666;--line:#ddd;--acc:#0645ad}
+@media(prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--dim:#999;--line:#333;--acc:#6ea8fe}}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;margin:0;padding:1rem;max-width:56rem}
+input,select{font:inherit;padding:.4rem;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:3px}
+input[type=search]{width:min(28rem,70vw)}
+.t{border-bottom:1px solid var(--line);padding:.7rem 0}
+.m{color:var(--dim);font-size:.85em}
+.d{color:#c00;font-weight:600}
+a{color:var(--acc)}
+pre{white-space:pre-wrap;margin:.3rem 0;font:inherit}
+</style>
+<h2>roost</h2>
+<form onsubmit="go();return false">
+<input type=search id=q placeholder="search text, or @handle" autofocus>
+<select id=k><option value=text>text</option><option value=user>@handle</option>
+<option value=dm>dms</option></select>
+<button>search</button></form>
+<p class=m id=s></p><div id=o></div>
+<script>
+async function go(){
+ const q=document.getElementById('q').value,k=document.getElementById('k').value;
+ const r=await fetch('/api?k='+k+'&q='+encodeURIComponent(q));const j=await r.json();
+ document.getElementById('s').textContent=j.n+' results';
+ document.getElementById('o').innerHTML=j.rows.map(x=>
+  '<div class=t><div class=m>'+x.d+(x.del?' <span class=d>DELETED</span>':'')+
+  (x.rt?' reply to @'+x.rt:'')+' &middot; <a target=_blank href="https://twitter.com/i/status/'+x.id+'">'+x.id+'</a></div>'+
+  '<pre>'+x.t+'</pre></div>').join('');
+}
+</script>"""
+
+
+def cmd_serve(args):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import urlparse, parse_qs
+    db = connect(args.db)
+
+    def esc(s):
+        return html.escape(s or "")
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            if u.path == "/":
+                body = PAGE.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+            elif u.path == "/api":
+                p = parse_qs(u.query)
+                q = (p.get("q") or [""])[0]
+                k = (p.get("k") or ["text"])[0]
+                try:
+                    if k == "user":
+                        h = q.lstrip("@").lower()
+                        rows = db.execute(
+                            "SELECT DISTINCT t.* FROM tweets t LEFT JOIN mentions m ON m.tweet_id=t.id "
+                            "WHERE LOWER(t.reply_to_user)=? OR m.handle=? ORDER BY t.ts LIMIT 500",
+                            (h, h)).fetchall()
+                    elif k == "dm":
+                        rows = db.execute(
+                            "SELECT d.id, d.ts, d.text, 0 AS deleted, NULL AS reply_to_user "
+                            "FROM dms_fts f JOIN dms d ON d.rowid=f.rowid WHERE dms_fts MATCH ? "
+                            "ORDER BY d.ts LIMIT 500", (q,)).fetchall()
+                    else:
+                        rows = db.execute(
+                            "SELECT t.* FROM tweets_fts f JOIN tweets t ON t.rowid=f.rowid "
+                            "WHERE tweets_fts MATCH ? ORDER BY t.ts LIMIT 500", (q,)).fetchall()
+                except sqlite3.OperationalError as e:
+                    rows = []
+                out = []
+                for r in rows:
+                    d = datetime.fromtimestamp(r["ts"], timezone.utc).strftime("%Y-%m-%d %H:%M") if r["ts"] else "?"
+                    out.append({"id": r["id"], "d": d, "t": esc(r["text"]),
+                                "del": bool(r["deleted"]), "rt": esc(r["reply_to_user"])})
+                body = json.dumps({"n": len(out), "rows": out}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    # loopback only. this is your dm archive, it does not belong on a lan.
+    srv = HTTPServer(("127.0.0.1", args.port), H)
+    print(f"  http://127.0.0.1:{args.port}   (loopback only, ctrl-c to stop)")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  stopped")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="roost", description="read an X/Twitter data export")
+    p.add_argument("--db", default=DB_DEFAULT)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    a = sub.add_parser("load", help="build the database from a .zip or extracted dir")
+    a.add_argument("archive")
+    a.add_argument("--force", action="store_true")
+    a.set_defaults(fn=cmd_load)
+
+    a = sub.add_parser("stats", help="what is in the database")
+    a.set_defaults(fn=cmd_stats)
+
+    a = sub.add_parser("search", help="full text search over tweets")
+    a.add_argument("query")
+    a.add_argument("--limit", type=int, default=50)
+    a.set_defaults(fn=cmd_search)
+
+    a = sub.add_parser("user", help="everything involving a handle")
+    a.add_argument("handle")
+    a.add_argument("--limit", type=int, default=200)
+    a.set_defaults(fn=cmd_user)
+
+    a = sub.add_parser("thread", help="walk a tweet up to its root and back down")
+    a.add_argument("id")
+    a.set_defaults(fn=cmd_thread)
+
+    a = sub.add_parser("serve", help="browse it in a browser, loopback only")
+    a.add_argument("--port", type=int, default=8777)
+    a.set_defaults(fn=cmd_serve)
+
+    args = p.parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()

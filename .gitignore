@@ -1,0 +1,8 @@
+*.db
+*.db-journal
+*.db-wal
+*.zip
+data/
+*.js
+roost.db
+__pycache__/
