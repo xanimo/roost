@@ -279,35 +279,91 @@ def cmd_thread(args):
 
 
 PAGE = """<!doctype html><meta charset=utf-8><title>roost</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
 <style>
-:root{--bg:#fff;--fg:#111;--dim:#666;--line:#ddd;--acc:#0645ad}
-@media(prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--dim:#999;--line:#333;--acc:#6ea8fe}}
-body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;margin:0;padding:1rem;max-width:56rem}
-input,select{font:inherit;padding:.4rem;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:3px}
-input[type=search]{width:min(28rem,70vw)}
+:root{--bg:#fff;--fg:#111;--dim:#666;--line:#ddd;--acc:#0645ad;--card:#fafafa}
+@media(prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--dim:#999;--line:#2a2a2a;--acc:#6ea8fe;--card:#181818}}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,sans-serif;margin:0}
+header{position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--line);padding:.7rem 1rem;z-index:9}
+h1{font-size:1.1rem;margin:0 0 .5rem}
+.bar{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center}
+input,select,button{font:inherit;padding:.35rem .5rem;background:var(--bg);color:var(--fg);
+ border:1px solid var(--line);border-radius:4px}
+input[type=search]{flex:1;min-width:12rem}
+button{cursor:pointer}
+button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+main{padding:0 1rem 3rem;max-width:60rem}
+.st{color:var(--dim);font-size:.85em;padding:.5rem 0}
 .t{border-bottom:1px solid var(--line);padding:.7rem 0}
-.m{color:var(--dim);font-size:.85em}
-.d{color:#c00;font-weight:600}
-a{color:var(--acc)}
-pre{white-space:pre-wrap;margin:.3rem 0;font:inherit}
+.m{color:var(--dim);font-size:.82em;display:flex;gap:.5rem;flex-wrap:wrap}
+.d{color:#e00;font-weight:600}
+.rt{opacity:.65}
+pre{white-space:pre-wrap;word-wrap:break-word;margin:.35rem 0 0;font:inherit}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+nav{display:flex;gap:.5rem;align-items:center;padding:1rem 0}
+.conv{padding:.55rem 0;border-bottom:1px solid var(--line);cursor:pointer}
+.conv:hover{background:var(--card)}
+.me{border-left:3px solid var(--acc);padding-left:.6rem}
+.them{border-left:3px solid var(--line);padding-left:.6rem}
 </style>
-<h2>roost</h2>
-<form onsubmit="go();return false">
-<input type=search id=q placeholder="search text, or @handle" autofocus>
-<select id=k><option value=text>text</option><option value=user>@handle</option>
-<option value=dm>dms</option></select>
-<button>search</button></form>
-<p class=m id=s></p><div id=o></div>
+<header>
+<h1>roost <span class=st id=who></span></h1>
+<div class=bar>
+ <button id=tab-tweets class=on onclick="setTab('tweets')">tweets</button>
+ <button id=tab-dms onclick="setTab('dms')">dms</button>
+ <input type=search id=q placeholder="filter, or leave empty for everything">
+ <select id=type>
+  <option value=all>all</option><option value=original>original only</option>
+  <option value=replies>replies</option><option value=retweets>retweets</option>
+  <option value=deleted>deleted</option></select>
+ <select id=sort><option value=desc>newest first</option><option value=asc>oldest first</option></select>
+ <button onclick="load(0)">apply</button>
+</div></header>
+<main><div class=st id=s></div><div id=o></div>
+<nav><button onclick="page(-1)">&larr; prev</button>
+<span class=st id=pg></span><button onclick="page(1)">next &rarr;</button></nav></main>
 <script>
-async function go(){
- const q=document.getElementById('q').value,k=document.getElementById('k').value;
- const r=await fetch('/api?k='+k+'&q='+encodeURIComponent(q));const j=await r.json();
- document.getElementById('s').textContent=j.n+' results';
- document.getElementById('o').innerHTML=j.rows.map(x=>
-  '<div class=t><div class=m>'+x.d+(x.del?' <span class=d>DELETED</span>':'')+
-  (x.rt?' reply to @'+x.rt:'')+' &middot; <a target=_blank href="https://twitter.com/i/status/'+x.id+'">'+x.id+'</a></div>'+
-  '<pre>'+x.t+'</pre></div>').join('');
+let tab='tweets',off=0,lim=100,conv=null,total=0;
+const $=i=>document.getElementById(i);
+function setTab(t){tab=t;conv=null;$('tab-tweets').className=t=='tweets'?'on':'';
+ $('tab-dms').className=t=='dms'?'on':'';load(0);}
+function page(d){const n=off+d*lim;if(n<0||n>=total)return;load(n);}
+function esc(s){return s;}
+async function load(o){
+ off=o;
+ if(tab=='dms'&&!conv){
+  const j=await(await fetch('/api/convs')).json();
+  total=j.n;$('s').textContent=j.n+' conversations';$('pg').textContent='';
+  $('o').innerHTML=j.rows.map(c=>'<div class=conv onclick="openConv(\\''+c.id+'\\')">'+
+   '<b>'+c.id+'</b> <span class=st>'+c.n+' messages &middot; '+c.first+' to '+c.last+
+   (c.group?' &middot; group':'')+'</span></div>').join('');
+  return;
+ }
+ const u=tab=='dms'
+  ?'/api/dms?conv='+encodeURIComponent(conv)+'&q='+encodeURIComponent($('q').value)+'&off='+off+'&lim='+lim
+  :'/api/tweets?q='+encodeURIComponent($('q').value)+'&type='+$('type').value+
+   '&sort='+$('sort').value+'&off='+off+'&lim='+lim;
+ const j=await(await fetch(u)).json();
+ total=j.total;
+ $('s').innerHTML=(conv?'<a href="#" onclick="conv=null;load(0);return false">&larr; all conversations</a> &middot; ':'')+
+  j.total.toLocaleString()+' '+(tab=='dms'?'messages':'tweets')+(j.q?' matching':'');
+ $('pg').textContent=total?((off+1)+'-'+Math.min(off+lim,total)+' of '+total.toLocaleString()):'';
+ $('o').innerHTML=j.rows.map(x=>tab=='dms'
+  ?'<div class="t '+(x.mine?'me':'them')+'"><div class=m><span>'+x.d+'</span><span>'+
+    (x.mine?'you':x.sender)+'</span></div><pre>'+x.t+'</pre></div>'
+  :'<div class="t'+(x.rtw?' rt':'')+'"><div class=m><span>'+x.d+'</span>'+
+    (x.del?'<span class=d>DELETED</span>':'')+
+    (x.rt?'<span>reply to @'+x.rt+'</span>':'')+
+    '<a target=_blank href="https://twitter.com/i/status/'+x.id+'">open</a>'+
+    (x.fav?'<span>'+x.fav+' likes</span>':'')+'</div><pre>'+x.t+'</pre></div>').join('');
+ scrollTo(0,0);
 }
+function openConv(c){conv=c;load(0);}
+$('q').addEventListener('keydown',e=>{if(e.key=='Enter')load(0);});
+(async()=>{const m=await(await fetch('/api/stats')).json();
+ $('who').textContent='@'+m.username+' \\u00b7 '+m.tweets.toLocaleString()+' tweets \\u00b7 '+
+  m.dms.toLocaleString()+' dms \\u00b7 '+m.range;load(0);})();
 </script>"""
 
 
@@ -315,9 +371,85 @@ def cmd_serve(args):
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from urllib.parse import urlparse, parse_qs
     db = connect(args.db)
+    meta = dict(db.execute("SELECT key, value FROM meta"))
+    me = meta.get("accountId", "")
 
-    def esc(s):
-        return html.escape(s or "")
+    def fmt(ts):
+        return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M") if ts else "?"
+
+    def tweets_query(p):
+        q = (p.get("q") or [""])[0].strip()
+        typ = (p.get("type") or ["all"])[0]
+        order = "DESC" if (p.get("sort") or ["desc"])[0] == "desc" else "ASC"
+        off = max(0, int((p.get("off") or ["0"])[0]))
+        lim = min(500, max(1, int((p.get("lim") or ["100"])[0])))
+        where, params = [], []
+        if typ == "original":
+            where.append("t.is_retweet=0 AND t.reply_to_user IS NULL AND t.deleted=0")
+        elif typ == "replies":
+            where.append("t.reply_to_user IS NOT NULL")
+        elif typ == "retweets":
+            where.append("t.is_retweet=1")
+        elif typ == "deleted":
+            where.append("t.deleted=1")
+        if q:
+            # fts when it parses, plain LIKE when the user types something fts rejects
+            try:
+                db.execute("SELECT 1 FROM tweets_fts WHERE tweets_fts MATCH ? LIMIT 1", (q,)).fetchone()
+                base = ("FROM tweets t JOIN tweets_fts f ON t.rowid=f.rowid "
+                        "WHERE tweets_fts MATCH ?")
+                params.append(q)
+            except sqlite3.OperationalError:
+                base = "FROM tweets t WHERE t.text LIKE ?"
+                params.append(f"%{q}%")
+        else:
+            base = "FROM tweets t WHERE 1=1"
+        for w in where:
+            base += " AND " + w
+        total = db.execute("SELECT COUNT(*) " + base, params).fetchone()[0]
+        rows = db.execute("SELECT t.* " + base + f" ORDER BY t.ts {order} LIMIT ? OFFSET ?",
+                          params + [lim, off]).fetchall()
+        return {"total": total, "q": bool(q), "rows": [
+            {"id": r["id"], "d": fmt(r["ts"]), "t": html.escape(r["text"] or ""),
+             "del": bool(r["deleted"]), "rt": html.escape(r["reply_to_user"] or ""),
+             "rtw": bool(r["is_retweet"]), "fav": r["favorites"]} for r in rows]}
+
+    def convs_query():
+        rows = db.execute(
+            "SELECT conversation id, COUNT(*) n, MIN(ts) a, MAX(ts) b, MAX(is_group) g "
+            "FROM dms GROUP BY conversation ORDER BY b DESC").fetchall()
+        f = lambda t: datetime.fromtimestamp(t, timezone.utc).date().isoformat() if t else "?"
+        return {"n": len(rows), "rows": [
+            {"id": r["id"], "n": r["n"], "first": f(r["a"]), "last": f(r["b"]),
+             "group": bool(r["g"])} for r in rows]}
+
+    def dms_query(p):
+        conv = (p.get("conv") or [""])[0]
+        q = (p.get("q") or [""])[0].strip()
+        off = max(0, int((p.get("off") or ["0"])[0]))
+        lim = min(500, max(1, int((p.get("lim") or ["100"])[0])))
+        base, params = "FROM dms d WHERE 1=1", []
+        if conv and conv != "null":
+            base += " AND d.conversation=?"
+            params.append(conv)
+        if q:
+            base += " AND d.text LIKE ?"
+            params.append(f"%{q}%")
+        total = db.execute("SELECT COUNT(*) " + base, params).fetchone()[0]
+        rows = db.execute("SELECT d.* " + base + " ORDER BY d.ts ASC LIMIT ? OFFSET ?",
+                          params + [lim, off]).fetchall()
+        return {"total": total, "q": bool(q), "rows": [
+            {"d": fmt(r["ts"]), "t": html.escape(r["text"] or ""),
+             "mine": r["sender"] == me, "sender": html.escape(r["sender"] or "")}
+            for r in rows]}
+
+    def stats_query():
+        r = db.execute("SELECT MIN(ts), MAX(ts) FROM tweets WHERE ts IS NOT NULL").fetchone()
+        f = lambda t: datetime.fromtimestamp(t, timezone.utc).date().isoformat() if t else "?"
+        return {"username": meta.get("username", "?"),
+                "tweets": db.execute("SELECT COUNT(*) FROM tweets").fetchone()[0],
+                "dms": db.execute("SELECT COUNT(*) FROM dms").fetchone()[0],
+                "range": f"{f(r[0])} to {f(r[1])}"}
 
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -325,44 +457,25 @@ def cmd_serve(args):
 
         def do_GET(self):
             u = urlparse(self.path)
-            if u.path == "/":
-                body = PAGE.encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-            elif u.path == "/api":
-                p = parse_qs(u.query)
-                q = (p.get("q") or [""])[0]
-                k = (p.get("k") or ["text"])[0]
-                try:
-                    if k == "user":
-                        h = q.lstrip("@").lower()
-                        rows = db.execute(
-                            "SELECT DISTINCT t.* FROM tweets t LEFT JOIN mentions m ON m.tweet_id=t.id "
-                            "WHERE LOWER(t.reply_to_user)=? OR m.handle=? ORDER BY t.ts LIMIT 500",
-                            (h, h)).fetchall()
-                    elif k == "dm":
-                        rows = db.execute(
-                            "SELECT d.id, d.ts, d.text, 0 AS deleted, NULL AS reply_to_user "
-                            "FROM dms_fts f JOIN dms d ON d.rowid=f.rowid WHERE dms_fts MATCH ? "
-                            "ORDER BY d.ts LIMIT 500", (q,)).fetchall()
-                    else:
-                        rows = db.execute(
-                            "SELECT t.* FROM tweets_fts f JOIN tweets t ON t.rowid=f.rowid "
-                            "WHERE tweets_fts MATCH ? ORDER BY t.ts LIMIT 500", (q,)).fetchall()
-                except sqlite3.OperationalError as e:
-                    rows = []
-                out = []
-                for r in rows:
-                    d = datetime.fromtimestamp(r["ts"], timezone.utc).strftime("%Y-%m-%d %H:%M") if r["ts"] else "?"
-                    out.append({"id": r["id"], "d": d, "t": esc(r["text"]),
-                                "del": bool(r["deleted"]), "rt": esc(r["reply_to_user"])})
-                body = json.dumps({"n": len(out), "rows": out}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-            else:
-                self.send_response(404)
-                self.end_headers()
-                return
+            p = parse_qs(u.query)
+            try:
+                if u.path == "/":
+                    body, ctype = PAGE.encode(), "text/html; charset=utf-8"
+                elif u.path == "/api/tweets":
+                    body, ctype = json.dumps(tweets_query(p)).encode(), "application/json"
+                elif u.path == "/api/convs":
+                    body, ctype = json.dumps(convs_query()).encode(), "application/json"
+                elif u.path == "/api/dms":
+                    body, ctype = json.dumps(dms_query(p)).encode(), "application/json"
+                elif u.path == "/api/stats":
+                    body, ctype = json.dumps(stats_query()).encode(), "application/json"
+                else:
+                    self.send_response(404); self.end_headers(); return
+            except Exception as e:
+                body = json.dumps({"error": str(e), "total": 0, "rows": [], "n": 0}).encode()
+                ctype = "application/json"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
