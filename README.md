@@ -25,6 +25,12 @@ takes an already-extracted directory.
 `serve` binds `127.0.0.1` and nothing else. this is your dm archive, it does not
 belong on a lan.
 
+it opens on your own posts, newest first, with retweets excluded. on a busy
+account retweets are the large majority of rows and none of them are your
+words, so they are a filter you turn on rather than the thing you wade through.
+there is a year row for jumping, and the dm tab lists conversations biggest
+first and remembers where you were when you come back out of one.
+
 ## what it loads
 
 ```
@@ -34,7 +40,16 @@ likes, including like-partN
 direct-messages and group          sender, recipient, timestamp, text
 mentions and urls                  extracted per tweet
 account                            handle, id, created
+handles                            id -> @name, built from mentions and replies
 ```
+
+dm files store numeric account ids and no names, which is why other tools show
+you a wall of digits. every `user_mentions` entry and every reply target in your
+own tweets carries an id and a handle together, so roost builds a lookup from
+them and names the conversations it can. expect roughly the people you also
+talked to in public: on a real archive that resolved the top conversations by
+volume and about one in six overall. the rest are people who never appear in a
+tweet, and their names are not in the export in any form.
 
 a large export, low six figures of tweets and likes, loads in well under a
 minute. the database is a fraction of the zip, which is mostly media.
