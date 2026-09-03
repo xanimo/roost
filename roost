@@ -289,7 +289,7 @@ def cmd_thread(args):
         show(kids)
 
 
-PAGE = """<!doctype html><meta charset=utf-8><title>roost</title>
+PAGE = r"""<!doctype html><meta charset=utf-8><title>roost</title>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <style>
 :root{--bg:#fff;--fg:#111;--dim:#777;--line:#e2e2e2;--acc:#0645ad;--card:#f7f7f7}
@@ -367,7 +367,7 @@ async function load(o){
  $('s').innerHTML=(tab=='dms'
    ?'<a href="#" onclick="back();return false">&larr; conversations</a> &middot; <b>'+(j.label||'')+'</b> &middot; '
    :'')+j.total.toLocaleString()+' '+(tab=='dms'?'messages':'posts');
- $('pg').textContent=total?((off+1)+'\u2013'+Math.min(off+lim,total)+' of '+total.toLocaleString()):'none';
+ $('pg').textContent=total?((off+1)+'-'+Math.min(off+lim,total)+' of '+total.toLocaleString()):'none';
  if(tab=='tweets'&&j.years){$('years').innerHTML=j.years.map(y=>
    '<button class="'+(year==y?'on':'')+'" onclick="setYear(\''+y+'\')">'+y+'</button>').join('');}
  $('o').innerHTML=j.rows.map(x=>tab=='dms'
