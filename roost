@@ -403,6 +403,11 @@ def cmd_serve(args):
     def fmt(ts):
         return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M") if ts else "?"
 
+    def txt(s):
+        """the export stores text with < > & already escaped, so escaping again
+        turns a heart into &lt;3. unescape first, then escape once for the dom."""
+        return html.escape(html.unescape(s or ""))
+
     def tweets_query(p):
         q = (p.get("q") or [""])[0].strip()
         typ = (p.get("type") or ["all"])[0]
@@ -450,7 +455,7 @@ def cmd_serve(args):
             "SELECT DISTINCT strftime('%Y', ts, 'unixepoch') y FROM tweets "
             "WHERE ts IS NOT NULL ORDER BY y").fetchall()]
         return {"total": total, "q": bool(q), "years": years, "rows": [
-            {"id": r["id"], "d": fmt(r["ts"]), "t": html.escape(r["text"] or ""),
+            {"id": r["id"], "d": fmt(r["ts"]), "t": txt(r["text"]),
              "del": bool(r["deleted"]), "rt": html.escape(r["reply_to_user"] or ""),
              "rtw": bool(r["is_retweet"]), "fav": r["favorites"]} for r in rows]}
 
@@ -517,7 +522,7 @@ def cmd_serve(args):
         return {"total": total, "q": bool(q), "note": note,
                 "label": conv_label(conv, 0) if conv and conv != "null" else "",
                 "rows": [
-            {"d": fmt(r["ts"]), "t": html.escape(r["text"] or ""),
+            {"d": fmt(r["ts"]), "t": txt(r["text"]),
              "mine": r["sender"] == me, "sender": html.escape(who(r["sender"]))}
             for r in rows]}
 
