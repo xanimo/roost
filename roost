@@ -355,7 +355,8 @@ async function load(o){
   total=0;$('s').textContent=j.n+' conversations, most recent first';$('pg').textContent='';
   $('years').innerHTML='';
   $('o').innerHTML=j.rows.map(c=>'<div class=conv onclick="openConv(\''+c.id+'\')">'+
-   '<b>'+c.label+'</b><span class=hint>'+c.n+' messages &middot; '+c.first+' to '+c.last+'</span></div>').join('');
+   '<b>'+c.label+'</b><span class=hint>'+c.n+' messages &middot; '+c.first+' to '+c.last+
+   (c.onesided?' &middot; one-sided':'')+'</span></div>').join('');
   return;
  }
  const u=tab=='dms'
@@ -365,7 +366,8 @@ async function load(o){
  const j=await(await fetch(u)).json();
  total=j.total;
  $('s').innerHTML=(tab=='dms'
-   ?'<a href="#" onclick="back();return false">&larr; conversations</a> &middot; <b>'+(j.label||'')+'</b> &middot; '
+   ?'<a href="#" onclick="back();return false">&larr; conversations</a> &middot; <b>'+(j.label||'')+'</b> &middot; '+
+     (j.note?'<span class=d>'+j.note+'</span> &middot; ':'')
    :'')+j.total.toLocaleString()+' '+(tab=='dms'?'messages':'posts');
  $('pg').textContent=total?((off+1)+'-'+Math.min(off+lim,total)+' of '+total.toLocaleString()):'none';
  if(tab=='tweets'&&j.years){$('years').innerHTML=j.years.map(y=>
@@ -475,11 +477,14 @@ def cmd_serve(args):
             "SELECT conversation id, COUNT(*) n, MIN(ts) a, MAX(ts) b, MAX(is_group) g "
             "FROM dms GROUP BY conversation ORDER BY n DESC").fetchall()
         f = lambda t: datetime.fromtimestamp(t, timezone.utc).date().isoformat() if t else "?"
+        sides = dict(db.execute(
+            "SELECT conversation, COUNT(DISTINCT sender) FROM dms GROUP BY conversation"))
         out = []
         for r in rows:
             out.append({"id": r["id"], "label": conv_label(r["id"], r["g"]),
                         "n": r["n"], "first": f(r["a"]), "last": f(r["b"]),
-                        "group": bool(r["g"])})
+                        "group": bool(r["g"]),
+                        "onesided": sides.get(r["id"], 0) < 2 and not r["g"]})
         named = sum(1 for o in out if not o["label"].isdigit() and "," not in o["label"][:1])
         return {"n": len(out), "rows": out}
 
@@ -498,7 +503,18 @@ def cmd_serve(args):
         total = db.execute("SELECT COUNT(*) " + base, params).fetchone()[0]
         rows = db.execute("SELECT d.* " + base + " ORDER BY d.ts ASC LIMIT ? OFFSET ?",
                           params + [lim, off]).fetchall()
-        return {"total": total, "q": bool(q),
+        # a conversation with one distinct sender is not a conversation. either
+        # nobody replied, or the other side is gone from the export because the
+        # account was deleted. x strips those without saying so.
+        note = ""
+        if conv and conv != "null":
+            senders = [r[0] for r in db.execute(
+                "SELECT DISTINCT sender FROM dms WHERE conversation=?", (conv,))]
+            if len(senders) == 1:
+                note = ("only your messages are in the export for this conversation, "
+                        "the other side is missing") if senders[0] == me else \
+                       "only their messages are in the export, you never replied"
+        return {"total": total, "q": bool(q), "note": note,
                 "label": conv_label(conv, 0) if conv and conv != "null" else "",
                 "rows": [
             {"d": fmt(r["ts"]), "t": html.escape(r["text"] or ""),

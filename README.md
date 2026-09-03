@@ -71,6 +71,24 @@ N of their tweet ids, recovered from your reply metadata:
 those ids are what you feed to the wayback machine. it is the only route from
 your own export back to somebody else's deleted posts.
 
+## one-sided conversations
+
+a dm conversation in an export often contains only one side. roost counts the
+distinct senders and says so rather than letting you conclude you talked to
+yourself. two different causes and they look identical in the file:
+
+nobody replied. someone dm'd you once and you ignored it. on a large account
+this is most of them.
+
+the other side is gone. the account was deleted or suspended, or they deleted
+their messages, and x removes those from the export with no marker. a
+conversation of a thousand messages with one sender is this case, not the first
+one.
+
+roost cannot tell you which, only that the conversation is one-sided. that is
+still worth knowing before you read a thousand messages wondering why nobody
+answered.
+
 ## what it does not do
 
 it does not contain other people's words. an export holds your tweets and the
