@@ -393,6 +393,75 @@ $('sort').addEventListener('change',()=>load(0));
 </script>"""
 
 
+def cmd_record(args):
+    """everything involving one account, in time order, with a source on each line.
+
+    an extract is only useful if every line can be traced back, so each carries
+    its conversation or tweet id. it reports what is one-sided and what is
+    missing rather than presenting a partial thread as a whole one."""
+    db = connect(args.db)
+    meta = dict(db.execute("SELECT key, value FROM meta"))
+    me = meta.get("accountId", "")
+    h = args.handle.lstrip("@").lower()
+    row = db.execute("SELECT id, handle FROM handles WHERE LOWER(handle)=?", (h,)).fetchone()
+    if not row:
+        raise SystemExit(f"@{h} does not appear in this archive, so nothing to extract")
+    uid, disp = row["id"], row["handle"]
+
+    def who(s):
+        if s == me:
+            return "you"
+        r = db.execute("SELECT handle FROM handles WHERE id=?", (s,)).fetchone()
+        return ("@" + r["handle"]) if r else s
+
+    def when(ts):
+        return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M") if ts else "?"
+
+    out = args.out or f"record-{disp}.txt"
+    events = []
+
+    # dms, both one-to-one and group, only conversations they actually spoke in
+    convs = [r[0] for r in db.execute(
+        "SELECT DISTINCT conversation FROM dms WHERE sender=?", (uid,))]
+    for c in convs:
+        for r in db.execute("SELECT * FROM dms WHERE conversation=? ORDER BY ts", (c,)):
+            events.append((r["ts"], "dm", c, who(r["sender"]), r["text"] or ""))
+
+    # your tweets replying to them or mentioning them
+    for r in db.execute(
+            "SELECT DISTINCT t.* FROM tweets t LEFT JOIN mentions m ON m.tweet_id=t.id "
+            "WHERE LOWER(t.reply_to_user)=? OR m.handle=? ORDER BY t.ts", (h, h)):
+        kind = "tweet-deleted" if r["deleted"] else "tweet"
+        events.append((r["ts"] or 0, kind, r["id"], "you", r["text"] or ""))
+
+    events.sort(key=lambda e: e[0] or 0)
+
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(f"record of material involving @{disp} (account id {uid})\n")
+        fh.write(f"extracted from {meta.get('source','?')}\n")
+        fh.write(f"archive holder: @{meta.get('username','?')} ({me})\n")
+        fh.write(f"events: {len(events)}\n\n")
+        fh.write("every line carries its source id. dm lines are conversation ids,\n")
+        fh.write("tweet lines are tweet ids and resolve at twitter.com/i/status/<id>.\n")
+        fh.write("this contains only what the export holds: your tweets, and dm text\n")
+        fh.write("from conversations that survived. it does not contain their tweets,\n")
+        fh.write("which an export never includes.\n\n")
+        fh.write("=" * 72 + "\n\n")
+        for ts, kind, src, speaker, text in events:
+            fh.write(f"{when(ts)}  [{kind} {src}]  {speaker}\n{text}\n\n")
+    os.chmod(out, 0o600)
+
+    print(f"  @{disp}: {len(events)} events -> {out}")
+    for c in convs:
+        n = db.execute("SELECT COUNT(*) FROM dms WHERE conversation=?", (c,)).fetchone()[0]
+        sides = db.execute("SELECT COUNT(DISTINCT sender) FROM dms WHERE conversation=?", (c,)).fetchone()[0]
+        grp = db.execute("SELECT MAX(is_group) FROM dms WHERE conversation=?", (c,)).fetchone()[0]
+        flag = "   ONE-SIDED, the other half is not in the export" if sides < 2 else ""
+        print(f"    {'group' if grp else '1:1  '} {c}  {n} msgs, {sides} senders{flag}")
+    print("  not included: their tweets, which an export never holds, and anything")
+    print("  either party deleted or said off the platform.")
+
+
 def cmd_serve(args):
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from urllib.parse import urlparse, parse_qs
@@ -598,6 +667,11 @@ def main():
     a = sub.add_parser("thread", help="walk a tweet up to its root and back down")
     a.add_argument("id")
     a.set_defaults(fn=cmd_thread)
+
+    a = sub.add_parser("record", help="export everything involving one account, sourced")
+    a.add_argument("handle")
+    a.add_argument("--out")
+    a.set_defaults(fn=cmd_record)
 
     a = sub.add_parser("serve", help="browse it in a browser, loopback only")
     a.add_argument("--port", type=int, default=8777)

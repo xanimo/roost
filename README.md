@@ -71,6 +71,22 @@ N of their tweet ids, recovered from your reply metadata:
 those ids are what you feed to the wayback machine. it is the only route from
 your own export back to somebody else's deleted posts.
 
+## record
+
+`record @someone` writes every event involving one account to a single file in
+time order: their messages and yours from any conversation they spoke in, group
+or one-to-one, plus your tweets that reply to or mention them. each line carries
+its conversation or tweet id, so any line can be traced back to the export it
+came from.
+
+```
+./roost --db <db> record @someone --out record-someone.txt
+```
+
+it prints the conversations it drew from, how many senders each had, and marks
+any that are one-sided, because a thread with one sender is not evidence of a
+conversation. it does not include their tweets. an export never contains those.
+
 ## one-sided conversations
 
 a dm conversation in an export often contains only one side. roost counts the
